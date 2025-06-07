@@ -81,10 +81,16 @@ for ((i=0; i<num_cases; i++)); do
     # Extract test case data from pre-loaded array
     IFS=':' read -r trip_duration miles_traveled receipts_amount expected <<< "${test_cases[i]}"
     
-    # Run the user's implementation
-    if script_output=$(./run.sh "$trip_duration" "$miles_traveled" "$receipts_amount" 2>/dev/null); then
+    # Run the user's script and capture the output
+    # Add a debug line to print inputs just before running
+    echo "DEBUG: ./run.sh \"${trip_duration}\" \"${miles_traveled}\" \"${receipts_amount}\"" >&2
+    output=$(./run.sh "${trip_duration}" "${miles_traveled}" "${receipts_amount}" || echo "Error: Script failure")
+
+    # Check for script failure
+    if [[ "$output" == "Error: Script failure" || -z "$output" ]]; then
+        errors_array+=("Case $((i+1)): Script failed")
+    else
         # Check if output is a valid number
-        output=$(echo "$script_output" | tr -d '[:space:]')
         if [[ $output =~ ^-?[0-9]+\.?[0-9]*$ ]]; then
             actual="$output"
             
@@ -118,10 +124,6 @@ for ((i=0; i<num_cases; i++)); do
         else
             errors_array+=("Case $((i+1)): Invalid output format: $output")
         fi
-    else
-        # Capture stderr for error reporting
-        error_msg=$(./run.sh "$trip_duration" "$miles_traveled" "$receipts_amount" 2>&1 >/dev/null | tr -d '\n')
-        errors_array+=("Case $((i+1)): Script failed with error: $error_msg")
     fi
 done
 
