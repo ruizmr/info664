@@ -130,7 +130,7 @@ def run_discovery():
 
     print("--- Starting Hyperparameter Optimization ---")
     study = optuna.create_study(direction='minimize')
-    study.optimize(lambda trial: objective(trial, df_engineered), n_trials=100, show_progress_bar=True)
+    study.optimize(lambda trial: objective(trial, df_engineered), n_trials=25, show_progress_bar=True)
     
     best_params = study.best_params
     print("\n--- Best Hyperparameters Found ---")
