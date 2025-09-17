@@ -95,6 +95,42 @@ python saas_revenue_multiple_model.py predict \
 
 ### Notes
 
+---
+
+## SEC Fundamentals ETL
+
+Build a local SQLite DB of company fundamentals directly from SEC APIs.
+
+### Quick start
+
+1) Install deps
+
+```bash
+pip install -r requirements.txt
+```
+
+2) Run ETL
+
+```bash
+python etl.py \
+  --tickers ADBE,MSFT \
+  --db saas_fundamentals.db \
+  --user-agent "your_email@example.com"
+```
+
+Or via a file:
+
+```bash
+python etl.py \
+  --tickers-file tickers.txt \
+  --db saas_fundamentals.db \
+  --user-agent "your_email@example.com"
+```
+
+- Creates/updates SQLite DB per `schema.sql` with tables: `companies`, `fundamentals`, `filings`.
+- Pulls `companyfacts` and `submissions` per CIK; computes LQ, annualized, LTM, and YoY metrics.
+- Respects SEC rate limits and requires a polite User-Agent.
+
 - The script robustly parses '$' and commas in cash/debt columns and '%' in margin.
 - Rows with missing inputs/target are dropped before splitting.
 - You can adjust model choice or hyperparameters inside `saas_revenue_multiple_model.py`.
