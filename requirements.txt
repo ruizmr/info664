@@ -9,3 +9,4 @@ sqlalchemy>=2.0.0
 tqdm>=4.66.0
 # yfinance is optional for price lookup; commented by default
 # yfinance>=0.2.40
+duckdb>=0.10.0

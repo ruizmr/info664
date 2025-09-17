@@ -33,8 +33,8 @@ from tqdm import tqdm
 SEC_TICKER_MAP_URL = "https://www.sec.gov/files/company_tickers.json"
 SEC_COMPANY_FACTS_URL = "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik}.json"
 SEC_SUBMISSIONS_URL = "https://data.sec.gov/submissions/CIK{cik}.json"
-NASDAQ_LISTED_URL = "https://ftp.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt"
-NASDAQ_OTHERLISTED_URL = "https://ftp.nasdaqtrader.com/dynamic/SymDir/otherlisted.txt"
+NASDAQ_LISTED_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt"
+NASDAQ_OTHERLISTED_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/otherlisted.txt"
 
 HEADERS_TMPL = {"User-Agent": None, "Accept-Encoding": "gzip, deflate"}
 
@@ -69,37 +69,46 @@ def fetch_nasdaq_symbol_dirs(session: requests.Session) -> pd.DataFrame:
     Columns: ticker, exchange, name, etf(bool), test(bool)
     """
     def fetch_table(url: str) -> pd.DataFrame:
-        rate_limit_sleep(0.15)
-        r = session.get(url, timeout=30)
-        r.raise_for_status()
-        # Some files have a footer line; pandas can parse with sep='|'
-        lines = [ln for ln in r.text.splitlines() if ln and not ln.startswith("File Creation Time")]
-        txt = "\n".join(lines)
-        df = pd.read_csv(pd.io.common.StringIO(txt), sep='|')
-        return df
+        # Robust retry for flaky NASDAQ endpoints
+        last_err: Optional[Exception] = None
+        for attempt in range(4):
+            try:
+                rate_limit_sleep(0.15)
+                r = session.get(url, timeout=20)
+                r.raise_for_status()
+                lines = [ln for ln in r.text.splitlines() if ln and not ln.startswith("File Creation Time")]
+                txt = "\n".join(lines)
+                df = pd.read_csv(pd.io.common.StringIO(txt), sep='|')
+                return df
+            except Exception as e:
+                last_err = e
+                time.sleep(1.0 * (attempt + 1))
+        # If still failing, return empty and let caller fallback to SEC-only
+        return pd.DataFrame()
 
     df_nas = fetch_table(NASDAQ_LISTED_URL)
     df_oth = fetch_table(NASDAQ_OTHERLISTED_URL)
 
     # Normalize NASDAQ-listed
     a = pd.DataFrame({
-        "ticker": df_nas["Symbol"].astype(str).str.upper().str.strip(),
+        "ticker": df_nas.get("Symbol", pd.Series(dtype=str)).astype(str).str.upper().str.strip(),
         "exchange": "NASDAQ",
-        "name": df_nas.get("Security Name", "").astype(str),
-        "etf": df_nas.get("ETF", "N").astype(str).str.upper().eq("Y"),
-        "test": df_nas.get("Test Issue", "N").astype(str).str.upper().eq("Y"),
+        "name": df_nas.get("Security Name", "").astype(str) if not df_nas.empty else pd.Series(dtype=str),
+        "etf": (df_nas.get("ETF", "N").astype(str).str.upper().eq("Y") if not df_nas.empty else pd.Series(dtype=bool)),
+        "test": (df_nas.get("Test Issue", "N").astype(str).str.upper().eq("Y") if not df_nas.empty else pd.Series(dtype=bool)),
     })
     # Normalize other-listed
     b = pd.DataFrame({
-        "ticker": df_oth.get("ACT Symbol", "").astype(str).str.upper().str.strip(),
-        "exchange": df_oth.get("Exchange", "").astype(str).str.upper().str.strip(),
-        "name": df_oth.get("Security Name", "").astype(str),
-        "etf": df_oth.get("ETF", "N").astype(str).str.upper().eq("Y"),
-        "test": df_oth.get("Test Issue", "N").astype(str).str.upper().eq("Y"),
+        "ticker": df_oth.get("ACT Symbol", pd.Series(dtype=str)).astype(str).str.upper().str.strip(),
+        "exchange": df_oth.get("Exchange", "").astype(str).str.upper().str.strip() if not df_oth.empty else pd.Series(dtype=str),
+        "name": df_oth.get("Security Name", "").astype(str) if not df_oth.empty else pd.Series(dtype=str),
+        "etf": (df_oth.get("ETF", "N").astype(str).str.upper().eq("Y") if not df_oth.empty else pd.Series(dtype=bool)),
+        "test": (df_oth.get("Test Issue", "N").astype(str).str.upper().eq("Y") if not df_oth.empty else pd.Series(dtype=bool)),
     })
     df = pd.concat([a, b], ignore_index=True)
     df = df.dropna(subset=["ticker"])  # remove blanks
-    df = df[~df["ticker"].str.contains("\^|~|\$|\.")]  # basic cleanup
+    # basic cleanup of special-symbol tickers
+    df = df[~df["ticker"].str.contains(r"\^|~|\$|\.", regex=True, na=False)]
     df = df.drop_duplicates("ticker")
     return df
 
@@ -112,7 +121,15 @@ def build_universe(session: requests.Session, include_etfs: bool = False, exchan
     sec_map = load_ticker_map(session)
     df_sec = pd.DataFrame({"ticker": list(sec_map.keys()), "cik": list(sec_map.values())})
     df_nas = fetch_nasdaq_symbol_dirs(session)
-    u = pd.merge(df_nas, df_sec, on="ticker", how="left")
+    if df_nas.empty:
+        # fallback to SEC-only universe
+        u = df_sec.copy()
+        u["exchange"] = "UNKNOWN"
+        u["name"] = None
+        u["etf"] = False
+        u["test"] = False
+    else:
+        u = pd.merge(df_nas, df_sec, on="ticker", how="left")
     # Filter
     u = u[~u["test"].astype(bool)]
     if not include_etfs:
@@ -539,13 +556,14 @@ def main() -> None:
         print(f"universe.json written with {len(uni)} symbols.")
         return
 
-    tickers = parse_tickers_arg(args.tickers, args.tickers_file)
-    if not tickers and args.tickers and args.tickers.strip().upper() == "ALL":
-        # Pull all tickers from SEC mapping
+    # Handle special ALL flag before parsing comma lists
+    if args.tickers and args.tickers.strip().upper() == "ALL":
         sess = requests.Session()
         h = HEADERS_TMPL.copy(); h["User-Agent"] = args.user_agent; sess.headers.update(h)
         mapping = load_ticker_map(sess)
         tickers = sorted(mapping.keys())
+    else:
+        tickers = parse_tickers_arg(args.tickers, args.tickers_file)
     if not tickers:
         raise SystemExit("Provide --tickers or --tickers-file")
     run_etl(tickers, args.db, args.user_agent)
