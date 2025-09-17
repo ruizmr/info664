@@ -31,6 +31,8 @@ from sklearn.model_selection import train_test_split, KFold
 from sklearn.metrics import mean_absolute_error, r2_score, mean_squared_error
 import matplotlib.pyplot as plt
 import optuna
+from multiprocessing import cpu_count
+from joblib import Parallel, delayed
 
 
 CSV_DEFAULT = "– A free database of all SaaS businesses listed on the U.S. stock exchanges NYSE and NASDAQ.csv"
@@ -357,7 +359,7 @@ def train_model(dataset: Dataset, random_state: int = 42, params: Optional[Dict[
     return model
 
 
-def tune_hyperparameters(dataset: Dataset, trials: int = 50, cv_folds: int = 5, random_state: int = 42) -> Dict[str, Any]:
+def tune_hyperparameters(dataset: Dataset, trials: int = 50, cv_folds: int = 5, random_state: int = 42, storage: Optional[str] = None, n_jobs: Optional[int] = None) -> Dict[str, Any]:
     """Run Optuna to minimise MAE via K-fold CV on the full parsed dataset.
 
     Returns the best parameter dict for the GBM.
@@ -389,13 +391,18 @@ def tune_hyperparameters(dataset: Dataset, trials: int = 50, cv_folds: int = 5, 
             maes.append(mean_absolute_error(y_val, pred))
         return float(np.mean(maes))
 
-    study = optuna.create_study(direction="minimize")
-    study.optimize(objective, n_trials=trials, show_progress_bar=False)
+    # Allow parallel multi-process trials via RDB storage and n_jobs
+    if storage is None:
+        storage = "sqlite:///optuna_saas.db"
+    study = optuna.create_study(direction="minimize", storage=storage, load_if_exists=True)
+    if n_jobs is None or n_jobs <= 0:
+        n_jobs = max(1, (cpu_count() or 1) - 1)
+    study.optimize(objective, n_trials=trials, show_progress_bar=False, n_jobs=n_jobs)
     best = study.best_params
     return best
 
 
-def train_ensemble(dataset: Dataset, params: Optional[Dict[str, Any]], n_models: int = 10, bootstrap: bool = True, base_seed: int = 42) -> List[GradientBoostingRegressor]:
+def train_ensemble(dataset: Dataset, params: Optional[Dict[str, Any]], n_models: int = 10, bootstrap: bool = True, base_seed: int = 42, n_jobs: int = 1) -> List[GradientBoostingRegressor]:
     """Train an ensemble of GBMs with optional bootstrap resampling.
 
     Args:
@@ -405,19 +412,22 @@ def train_ensemble(dataset: Dataset, params: Optional[Dict[str, Any]], n_models:
         bootstrap: If True, sample with replacement per member.
         base_seed: Seed for reproducibility; each member increments it.
     """
-    models: List[GradientBoostingRegressor] = []
     X = dataset.X_train
     y = dataset.y_train
     n = len(y)
     rng = np.random.default_rng(base_seed)
-    for i in range(n_models):
+
+    def build_member(member_idx: int) -> GradientBoostingRegressor:
         if bootstrap:
             idx = rng.integers(0, n, size=n)
             ds_i = Dataset(X[idx], dataset.X_test, y[idx], dataset.y_test, dataset.feature_names, dataset.tickers_test)
         else:
             ds_i = dataset
-        model = train_model(ds_i, random_state=base_seed + i, params=params)
-        models.append(model)
+        return train_model(ds_i, random_state=base_seed + member_idx, params=params)
+
+    if n_jobs is None or n_jobs <= 0:
+        n_jobs = max(1, (cpu_count() or 1) - 1)
+    models: List[GradientBoostingRegressor] = Parallel(n_jobs=n_jobs)(delayed(build_member)(i) for i in range(n_models))
     return models
 
 
@@ -687,11 +697,25 @@ def cli_train(args: argparse.Namespace) -> None:
     # Hyperparameter tuning (Optuna + K-fold CV)
     best_params: Optional[Dict[str, Any]] = None
     if args.tune:
-        best_params = tune_hyperparameters(ds, trials=args.trials, cv_folds=args.cv_folds, random_state=args.random_state)
+        best_params = tune_hyperparameters(
+            ds,
+            trials=args.trials,
+            cv_folds=args.cv_folds,
+            random_state=args.random_state,
+            storage=args.hpo_storage,
+            n_jobs=args.hpo_parallel,
+        )
 
     # Train either single model or MC ensemble
     if args.mc_ensemble and args.mc_ensemble > 1:
-        models = train_ensemble(ds, best_params, n_models=args.mc_ensemble, bootstrap=args.mc_bootstrap, base_seed=args.random_state)
+        models = train_ensemble(
+            ds,
+            best_params,
+            n_models=args.mc_ensemble,
+            bootstrap=args.mc_bootstrap,
+            base_seed=args.random_state,
+            n_jobs=args.mc_jobs,
+        )
         mae, rmse, r2 = evaluate(models, ds)
         joblib.dump({
             "models": models,
@@ -811,9 +835,12 @@ def build_parser() -> argparse.ArgumentParser:
     pt.add_argument("--tune", action="store_true", help="Enable Optuna hyperparameter tuning with K-fold CV")
     pt.add_argument("--trials", type=int, default=50, help="Number of Optuna trials (default: 50)")
     pt.add_argument("--cv-folds", type=int, default=5, help="Number of CV folds (default: 5)")
+    pt.add_argument("--hpo-storage", type=str, default=None, help="Optuna storage URL (e.g., sqlite:///optuna_saas.db) for parallel trials")
+    pt.add_argument("--hpo-parallel", type=int, default=0, help="Parallel Optuna workers (0 => CPU-1)")
     # Monte Carlo ensemble
     pt.add_argument("--mc-ensemble", type=int, default=1, help="Train N models for MC-style ensemble (default: 1)")
     pt.add_argument("--mc-bootstrap", action="store_true", help="Use bootstrap resampling per ensemble member")
+    pt.add_argument("--mc-jobs", type=int, default=0, help="Parallel jobs for ensemble training (0 => CPU-1)")
     pt.set_defaults(func=cli_train)
 
     # predict
