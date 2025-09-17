@@ -33,6 +33,8 @@ from tqdm import tqdm
 SEC_TICKER_MAP_URL = "https://www.sec.gov/files/company_tickers.json"
 SEC_COMPANY_FACTS_URL = "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik}.json"
 SEC_SUBMISSIONS_URL = "https://data.sec.gov/submissions/CIK{cik}.json"
+NASDAQ_LISTED_URL = "https://ftp.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt"
+NASDAQ_OTHERLISTED_URL = "https://ftp.nasdaqtrader.com/dynamic/SymDir/otherlisted.txt"
 
 HEADERS_TMPL = {"User-Agent": None, "Accept-Encoding": "gzip, deflate"}
 
@@ -59,6 +61,67 @@ def load_ticker_map(session: requests.Session) -> Dict[str, str]:
         if t and cik:
             mapping[t] = cik
     return mapping
+
+
+def fetch_nasdaq_symbol_dirs(session: requests.Session) -> pd.DataFrame:
+    """Return a DataFrame of tickers from NASDAQ Trader symbol directories.
+
+    Columns: ticker, exchange, name, etf(bool), test(bool)
+    """
+    def fetch_table(url: str) -> pd.DataFrame:
+        rate_limit_sleep(0.15)
+        r = session.get(url, timeout=30)
+        r.raise_for_status()
+        # Some files have a footer line; pandas can parse with sep='|'
+        lines = [ln for ln in r.text.splitlines() if ln and not ln.startswith("File Creation Time")]
+        txt = "\n".join(lines)
+        df = pd.read_csv(pd.io.common.StringIO(txt), sep='|')
+        return df
+
+    df_nas = fetch_table(NASDAQ_LISTED_URL)
+    df_oth = fetch_table(NASDAQ_OTHERLISTED_URL)
+
+    # Normalize NASDAQ-listed
+    a = pd.DataFrame({
+        "ticker": df_nas["Symbol"].astype(str).str.upper().str.strip(),
+        "exchange": "NASDAQ",
+        "name": df_nas.get("Security Name", "").astype(str),
+        "etf": df_nas.get("ETF", "N").astype(str).str.upper().eq("Y"),
+        "test": df_nas.get("Test Issue", "N").astype(str).str.upper().eq("Y"),
+    })
+    # Normalize other-listed
+    b = pd.DataFrame({
+        "ticker": df_oth.get("ACT Symbol", "").astype(str).str.upper().str.strip(),
+        "exchange": df_oth.get("Exchange", "").astype(str).str.upper().str.strip(),
+        "name": df_oth.get("Security Name", "").astype(str),
+        "etf": df_oth.get("ETF", "N").astype(str).str.upper().eq("Y"),
+        "test": df_oth.get("Test Issue", "N").astype(str).str.upper().eq("Y"),
+    })
+    df = pd.concat([a, b], ignore_index=True)
+    df = df.dropna(subset=["ticker"])  # remove blanks
+    df = df[~df["ticker"].str.contains("\^|~|\$|\.")]  # basic cleanup
+    df = df.drop_duplicates("ticker")
+    return df
+
+
+def build_universe(session: requests.Session, include_etfs: bool = False, exchanges: Optional[List[str]] = None) -> pd.DataFrame:
+    """Merge SEC map with NASDAQ directories; filter and return a universe DF.
+
+    Returns DF with columns: ticker, cik (may be NaN), exchange, name, etf, test
+    """
+    sec_map = load_ticker_map(session)
+    df_sec = pd.DataFrame({"ticker": list(sec_map.keys()), "cik": list(sec_map.values())})
+    df_nas = fetch_nasdaq_symbol_dirs(session)
+    u = pd.merge(df_nas, df_sec, on="ticker", how="left")
+    # Filter
+    u = u[~u["test"].astype(bool)]
+    if not include_etfs:
+        u = u[~u["etf"].astype(bool)]
+    if exchanges:
+        ex_set = set([e.upper() for e in exchanges])
+        u = u[u["exchange"].str.upper().isin(ex_set)]
+    u = u.sort_values(["exchange", "ticker"]).reset_index(drop=True)
+    return u
 
 
 def fetch_json(session: requests.Session, url: str) -> Optional[dict]:
@@ -363,6 +426,10 @@ def run_etl(tickers: List[str], db_path: str, user_agent: str) -> None:
             state = subs.get("addresses", {}).get("business", {}).get("stateOrCountry")
         except Exception:
             state = None
+        state_incorp = subs.get("stateOfIncorporation")
+        sic = subs.get("sic")
+        sic_desc = subs.get("sicDescription")
+        fy_end = subs.get("fiscalYearEnd")
 
         # Fundamentals
         rev_lq, rev_ann, rev_ltm, rev_yoy = compute_revenue_metrics(facts)
@@ -387,7 +454,27 @@ def run_etl(tickers: List[str], db_path: str, user_agent: str) -> None:
         except Exception:
             pass
 
-        upsert_company(engine, CompanyRow(cik=cik, ticker=t, name=name, business_state=state, price=price, market_cap=mcap))
+        # Company row
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO companies (cik, ticker, name, business_state, state_incorp, sic, sic_description, fiscal_year_end, last_price, market_cap)
+                    VALUES (:cik, :ticker, :name, :state, :sinc, :sic, :sicd, :fye, :price, :mcap)
+                    ON CONFLICT(cik) DO UPDATE SET
+                      ticker=excluded.ticker,
+                      name=excluded.name,
+                      business_state=excluded.business_state,
+                      state_incorp=excluded.state_incorp,
+                      sic=excluded.sic,
+                      sic_description=excluded.sic_description,
+                      fiscal_year_end=excluded.fiscal_year_end,
+                      last_price=excluded.last_price,
+                      market_cap=excluded.market_cap
+                    """
+                ),
+                {"cik": cik, "ticker": t, "name": name, "state": state, "sinc": state_incorp, "sic": sic, "sicd": sic_desc, "fye": fy_end, "price": price, "mcap": mcap},
+            )
         insert_fundamentals(engine, cik, {
             "rev_lq": rev_lq, "rev_annualized": rev_ann, "rev_ltm": rev_ltm, "rev_yoy": rev_yoy,
             "ebitda_lq": ebitda_lq, "ebitda_annualized": ebitda_ann, "ebitda_ltm": ebitda_ltm, "ebitda_yoy": ebitda_yoy, "ebitda_margin": ebitda_margin,
@@ -395,6 +482,19 @@ def run_etl(tickers: List[str], db_path: str, user_agent: str) -> None:
             "cash_sti": cash_sti, "total_debt": total_debt, "shares_outstanding": shares, "stock_price": price, "market_cap": mcap,
         }, stamps)
         upsert_filings(engine, cik, latest_filings(subs, cik))
+
+        # Optional: store raw facts subset (commented out to keep DB smaller)
+        # try:
+        #     with engine.begin() as conn:
+        #         for concept, obj in facts.get("facts", {}).get("us-gaap", {}).items():
+        #             for unit, arr in obj.get("units", {}).items():
+        #                 for e in arr[-4:]:  # last 4 only
+        #                     conn.execute(
+        #                         text("INSERT OR IGNORE INTO facts_raw (cik, concept, unit, end, fy, fp, form, val, dims) VALUES (:cik,:c,:u,:end,:fy,:fp,:f,:v,:d)"),
+        #                         {"cik": cik, "c": concept, "u": unit, "end": e.get("end"), "fy": e.get("fy"), "fp": e.get("fp"), "f": e.get("form"), "v": e.get("val"), "d": json.dumps(e.get("dimensional"))},
+        #                     )
+        # except Exception:
+        #     pass
 
     print("ETL complete.")
 
@@ -422,13 +522,30 @@ def parse_tickers_arg(t: Optional[str], file_path: Optional[str]) -> List[str]:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="SEC Fundamentals ETL → SQLite")
-    ap.add_argument("--tickers", help="Comma-separated tickers (e.g., ADBE,MSFT)")
+    ap.add_argument("--tickers", help="Comma-separated tickers (e.g., ADBE,MSFT or ALL for all mapped tickers)")
     ap.add_argument("--tickers-file", help="Path to text file with one ticker per line")
     ap.add_argument("--db", default="saas_fundamentals.db", help="SQLite DB file path")
     ap.add_argument("--user-agent", required=True, help="Polite SEC header: your email")
+    ap.add_argument("--build-universe", action="store_true", help="Build universe.json by merging SEC + NASDAQ directories and exit")
+    ap.add_argument("--include-etfs", action="store_true", help="Include ETFs in universe")
+    ap.add_argument("--exchanges", help="Comma-separated exchanges to keep (e.g., NASDAQ,NYSE)")
     args = ap.parse_args()
 
+    if args.build_universe:
+        sess = requests.Session(); h=HEADERS_TMPL.copy(); h["User-Agent"]=args.user_agent; sess.headers.update(h)
+        exch = [e.strip() for e in args.exchanges.split(",")] if args.exchanges else None
+        uni = build_universe(sess, include_etfs=args.include_etfs, exchanges=exch)
+        uni.to_json("universe.json", orient="records", indent=2)
+        print(f"universe.json written with {len(uni)} symbols.")
+        return
+
     tickers = parse_tickers_arg(args.tickers, args.tickers_file)
+    if not tickers and args.tickers and args.tickers.strip().upper() == "ALL":
+        # Pull all tickers from SEC mapping
+        sess = requests.Session()
+        h = HEADERS_TMPL.copy(); h["User-Agent"] = args.user_agent; sess.headers.update(h)
+        mapping = load_ticker_map(sess)
+        tickers = sorted(mapping.keys())
     if not tickers:
         raise SystemExit("Provide --tickers or --tickers-file")
     run_etl(tickers, args.db, args.user_agent)

@@ -4,6 +4,10 @@ CREATE TABLE IF NOT EXISTS companies (
   ticker TEXT,
   name TEXT,
   business_state TEXT,
+  state_incorp TEXT,
+  sic TEXT,
+  sic_description TEXT,
+  fiscal_year_end TEXT,
   last_price REAL,
   market_cap REAL
 );
@@ -35,11 +39,22 @@ CREATE TABLE IF NOT EXISTS fundamentals (
   net_income_yoy REAL,
   net_income_margin REAL,
 
+  gross_profit_lq REAL,
+  gross_margin REAL,
+  operating_income_lq REAL,
+  operating_margin REAL,
+
+  cfo_lq REAL,
+  capex_lq REAL,
+  fcf_lq REAL,
+
   cash_sti REAL,
   total_debt REAL,
   shares_outstanding REAL,
   stock_price REAL,
   market_cap REAL,
+
+  deferred_revenue REAL,
 
   FOREIGN KEY (cik) REFERENCES companies(cik)
 );
@@ -54,6 +69,21 @@ CREATE TABLE IF NOT EXISTS filings (
   url TEXT NOT NULL,
   UNIQUE(cik, filing_type, url),
   FOREIGN KEY (cik) REFERENCES companies(cik)
+);
+
+-- Optional raw facts store (subset or all concepts)
+CREATE TABLE IF NOT EXISTS facts_raw (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  cik TEXT NOT NULL,
+  concept TEXT NOT NULL,
+  unit TEXT,
+  end TEXT,
+  fy INTEGER,
+  fp TEXT,
+  form TEXT,
+  val REAL,
+  dims TEXT,
+  UNIQUE(cik, concept, unit, end, form, dims)
 );
 
 
