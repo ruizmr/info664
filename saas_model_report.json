@@ -1,0 +1,40 @@
+{
+  "timestamp": "2025-09-17T04:35:07.553167Z",
+  "tuned": true,
+  "trials": 10,
+  "cv_folds": 5,
+  "ensemble": true,
+  "ensemble_size": 5,
+  "feature_count": 19,
+  "feature_names": [
+    "Last Quarter Revenue__num",
+    "Annualized Revenue__num",
+    "LTM Revenue__num",
+    "YoY Growth%__num",
+    "IPO Year__num",
+    "Year Founded__num",
+    "Last Quarter EBITDA__num",
+    "Annualized EBITDA__num",
+    "YoY Change in EBITDA%__num",
+    "EBITDA Margin__num",
+    "Last Quarter Net Income__num",
+    "Annualized Net Income__num",
+    "YoY Change in Net Income%__num",
+    "Net Income Margin__num",
+    "Cash and Short Term Investments__num",
+    "YoY Change in Cash and Short Term Investments%__num",
+    "Total Debt__num",
+    "Employee Count__num",
+    "Annual Revenue per Employee (estimate)__num"
+  ],
+  "metrics": {
+    "mae": 3.0683398668424458,
+    "rmse": 3.926639799850959,
+    "r2": 0.7337196701198985,
+    "median_ae": 2.7029301531871672,
+    "p90_ae": 5.332363627775169,
+    "p95_ae": 5.813517035076236,
+    "mape_percent": 117.93162419998775,
+    "n_test": 33
+  }
+}
