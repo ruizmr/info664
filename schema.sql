@@ -60,6 +60,8 @@ CREATE TABLE IF NOT EXISTS fundamentals (
 );
 
 CREATE INDEX IF NOT EXISTS idx_fund_cik_date ON fundamentals(cik, report_date);
+-- Enforce one row per (cik, report_date)
+CREATE UNIQUE INDEX IF NOT EXISTS ux_fund_cik_report ON fundamentals(cik, report_date);
 
 -- Filings (unique by cik+type+url)
 CREATE TABLE IF NOT EXISTS filings (
@@ -85,5 +87,25 @@ CREATE TABLE IF NOT EXISTS facts_raw (
   dims TEXT,
   UNIQUE(cik, concept, unit, end, form, dims)
 );
+
+-- Audit records for metric extraction traceability
+CREATE TABLE IF NOT EXISTS fundamentals_audit (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  cik TEXT NOT NULL,
+  report_date TEXT,
+  fiscal_year INTEGER,
+  fiscal_period TEXT,
+  metric TEXT NOT NULL,
+  value REAL,
+  source_tag TEXT,
+  unit TEXT,
+  scale_applied INTEGER,
+  form TEXT,
+  fy INTEGER,
+  fp TEXT,
+  FOREIGN KEY (cik) REFERENCES companies(cik)
+);
+
+CREATE INDEX IF NOT EXISTS idx_fundaudit_cik_date_metric ON fundamentals_audit(cik, report_date, metric);
 
 

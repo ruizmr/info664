@@ -55,6 +55,55 @@ def run_summary(con: duckdb.DuckDBPyConnection) -> None:
     """
     print(con.sql(q_sample).to_df().to_string(index=False))
 
+    print("\n== Nulls per key column (ratio) ==")
+    q_nulls = """
+    SELECT
+      ROUND(100.0*SUM(report_date IS NULL)/COUNT(*),1) AS pct_null_report_date,
+      ROUND(100.0*SUM(revenue_lq IS NULL)/COUNT(*),1) AS pct_null_revenue_lq,
+      ROUND(100.0*SUM(ebitda_lq IS NULL)/COUNT(*),1) AS pct_null_ebitda_lq,
+      ROUND(100.0*SUM(net_income_lq IS NULL)/COUNT(*),1) AS pct_null_net_income_lq,
+      ROUND(100.0*SUM(cash_sti IS NULL)/COUNT(*),1) AS pct_null_cash_sti,
+      ROUND(100.0*SUM(total_debt IS NULL)/COUNT(*),1) AS pct_null_total_debt,
+      ROUND(100.0*SUM(shares_outstanding IS NULL)/COUNT(*),1) AS pct_null_shares
+    FROM sqlite_db.fundamentals;
+    """
+    print(con.sql(q_nulls).to_df().to_string(index=False))
+
+    print("\n== Margin distributions (histogram buckets) ==")
+    q_hist = """
+    WITH base AS (
+      SELECT ebitda_margin AS m FROM sqlite_db.fundamentals WHERE ebitda_margin IS NOT NULL
+    )
+    SELECT
+      CASE
+        WHEN m < -100 THEN '<-100'
+        WHEN m < -50 THEN '[-100,-50)'
+        WHEN m < 0 THEN '[-50,0)'
+        WHEN m < 20 THEN '[0,20)'
+        WHEN m < 40 THEN '[20,40)'
+        WHEN m < 60 THEN '[40,60)'
+        WHEN m < 80 THEN '[60,80)'
+        WHEN m <= 100 THEN '[80,100]'
+        ELSE '>100'
+      END AS bucket,
+      COUNT(*) AS n
+    FROM base
+    GROUP BY 1 ORDER BY 1;
+    """
+    print(con.sql(q_hist).to_df().to_string(index=False))
+
+    print("\n== Outlier margins (|margin|>100%) with links ==")
+    q_outliers = """
+    SELECT c.ticker, f.report_date, f.ebitda_margin, f.net_income_margin,
+           (SELECT url FROM sqlite_db.filings WHERE cik=f.cik AND filing_type IN ('10-Q','10-K') ORDER BY id DESC LIMIT 1) AS filing_url
+    FROM sqlite_db.fundamentals f
+    JOIN sqlite_db.companies c USING(cik)
+    WHERE (ABS(f.ebitda_margin) > 100 OR ABS(f.net_income_margin) > 100)
+    ORDER BY ABS(COALESCE(f.ebitda_margin,0)) + ABS(COALESCE(f.net_income_margin,0)) DESC
+    LIMIT 20;
+    """
+    print(con.sql(q_outliers).to_df().to_string(index=False))
+
 
 def export_parquet(con: duckdb.DuckDBPyConnection, out_path: str) -> None:
     con.sql(f"COPY (SELECT * FROM sqlite_db.fundamentals) TO '{out_path}' (FORMAT PARQUET);")

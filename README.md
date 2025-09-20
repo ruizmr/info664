@@ -131,6 +131,30 @@ python etl.py \
 - Pulls `companyfacts` and `submissions` per CIK; computes LQ, annualized, LTM, and YoY metrics.
 - Respects SEC rate limits and requires a polite User-Agent.
 
+### Recent improvements
+
+- Smart tag resolver per metric with provenance and caching.
+- Strict unit hygiene: monetary facts only in `USD`; shares in `shares`.
+- Scale normalization using SEC-provided `scale` (value × 10^scale).
+- Robust report stamps derived from the exact revenue row used (with fallbacks).
+- Margin computation only when periods align exactly; guardrails drop |margin| > 100%.
+- Preference for quarterly forms (`10-Q`) for LQ; `10-K` allowed for annual context/fallback.
+- Traceability: `fundamentals_audit` table logs source tag, unit, and scale per metric.
+- Polite rate limiting with jitter and retries/backoff for NASDAQ/SEC endpoints.
+
+### Validate with DuckDB
+
+```bash
+python duck_analytics.py --db saas_fundamentals.db --summary
+python duck_analytics.py --db saas_fundamentals.db --export fundamentals.parquet
+```
+
+### Sample rebuild
+
+```bash
+python etl.py --tickers AAPL,MSFT,AMZN,ADBE,NVDA --db saas_fundamentals.db --user-agent "you@example.com"
+```
+
 - The script robustly parses '$' and commas in cash/debt columns and '%' in margin.
 - Rows with missing inputs/target are dropped before splitting.
 - You can adjust model choice or hyperparameters inside `saas_revenue_multiple_model.py`.
